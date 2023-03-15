@@ -3,8 +3,7 @@ cd /home/ckb4640/ce_452/ && \
 ./simplescalar/simplesim-3.0/sim-outorder \
 -max:inst 100000000 \
 -fetch:ifqsize 16 \
--bpred 2lev \
--bpred:2lev 1 1024 8 0 \
+-bpred perfect \
 -bpred:ras 32 \
 -bpred:btb 1024 4 \
 -decode:width 4 \

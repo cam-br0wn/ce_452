@@ -4560,12 +4560,12 @@ sim_main(void)
     dlite_main(regs.regs_PC, regs.regs_PC + sizeof(md_inst_t),
 	       sim_cycle, &regs, mem);
 
-  if (fastfwd_count==0)
-    {
-      FILE *dump_file = eio_open(eiotrace_filename);
-      fprintf(stderr, "sim: ** Grabbing eiotracefile: %s **\n", eiotrace_filename);
-      eio_read_chkpt (&regs, mem, dump_file);
-    }
+  // if (fastfwd_count==0)
+  //   {
+  //     FILE *dump_file = eio_open(eiotrace_filename);
+  //     fprintf(stderr, "sim: ** Grabbing eiotracefile: %s **\n", eiotrace_filename);
+  //     eio_read_chkpt (&regs, mem, dump_file);
+  //   }
 
   /* fast forward simulator loop, performs functional simulation for
      FASTFWD_COUNT insts, then turns on performance (timing) simulation */
