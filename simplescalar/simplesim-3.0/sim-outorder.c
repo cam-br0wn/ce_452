@@ -150,12 +150,12 @@
 #include "dlite.h"
 #include "sim.h"
 
-FILE *eio_open(char *fname);
+// FILE *eio_open(char *fname);
 
-counter_t
-eio_read_chkpt(struct regs_t *regs,		/* regs to dump */
-		struct mem_t *mem,		/* memory to dump */
-		FILE *fd);			/* stream to read */
+// counter_t
+// eio_read_chkpt(struct regs_t *regs,		/* regs to dump */
+// 		struct mem_t *mem,		/* memory to dump */
+// 		FILE *fd);			/* stream to read */
 
 /*
  * This file implements a very detailed out-of-order issue superscalar
@@ -175,7 +175,7 @@ static struct mem_t *mem = NULL;
  * simulator options
  */
 
-static char *eiotrace_filename;
+// static char *eiotrace_filename;
 
 /* maximum number of inst's to execute */
 static unsigned int max_insts;
@@ -213,6 +213,13 @@ static int twolev_config[4] =
 static int comb_nelt = 1;
 static int comb_config[1] =
   { /* meta_table_size */1024 };
+
+
+//// perceptron configuration ////
+static int perceptron_nelt = 3;
+// config takes: # of perceptrons, # of branch history reg bits, history length
+static int perceptron_config[3] = { 128, /*No of BHR bits */ 8, /* hist */ 27};
+//// end perceptron configuration ////
 
 /* return address stack (RAS) size */
 static int ras_size = 8;
@@ -703,10 +710,10 @@ sim_reg_options(struct opt_odb_t *odb)
 	      &fastfwd_count, /* default */0,
 	      /* print */TRUE, /* format */NULL);
   
-  opt_reg_string(odb, "-eiotrace",
-                 "Trace file for fast forwarding <fname|none>",
-                 &eiotrace_filename, /* default */"",
-                 /* print */TRUE, /* format */NULL);
+  // opt_reg_string(odb, "-eiotrace",
+  //                "Trace file for fast forwarding <fname|none>",
+  //                &eiotrace_filename, /* default */"",
+  //                /* print */TRUE, /* format */NULL);
 
   opt_reg_string_list(odb, "-ptrace",
 	      "generate pipetrace, i.e., <fname|stdout|stderr> <range>",
@@ -767,7 +774,7 @@ sim_reg_options(struct opt_odb_t *odb)
                );
 
   opt_reg_string(odb, "-bpred",
-		 "branch predictor type {nottaken|taken|perfect|bimod|2lev|comb}",
+		 "branch predictor type {nottaken|taken|perfect|bimod|2lev|comb|perceptron}",
                  &pred_type, /* default */"bimod",
                  /* print */TRUE, /* format */NULL);
 
@@ -1017,6 +1024,11 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
       pred = NULL;
       pred_perfect = TRUE;
     }
+  //// adding perceptron ////
+  else if (!mystricmp(pred_type, "perceptron")) {
+    pred = bpred_create(BPredPerceptron, 0, 128, 8, 0, 27, 0, btb_config[0], btb_config[1], ras_size);
+  }
+  //// end adding perceptron ////
   else if (!mystricmp(pred_type, "taken"))
     {
       /* static predictor, not taken */

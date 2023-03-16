@@ -131,6 +131,23 @@
 /* turn this on to enable the SimpleScalar 2.0 RAS bug */
 /* #define RAS_BUG_COMPATIBLE */
 
+typedef struct {
+    char place_holder;
+    int prediction;
+    int out;
+    unsigned long long int speculation_history;
+    int *weights_table_entry;
+    unsigned long long *access_entry;
+} perceptron_update_t;
+
+// set a ceiling on what the weight value can be
+#define MAX_WEIGHT(weight_bits) ((1<<((weight_bits)-1))-1)
+// set a floor on what the weight value can be
+#define MIN_WEIGHT(weight_bits) (-((MAX_WEIGHT(weight_bits))+1))
+
+// according to the paper: " the best threshold THETA for a given history length h is always exactly THETA = floor(1.93*h + 14)"
+#define THETA(branch_history_reg_width) ((int) (1.93 * (branch_history_reg_width) + 14))
+
 /* create a branch predictor */
 struct bpred_t *			/* branch predictory instance */
 bpred_create(enum bpred_class class,	/* type of predictor to create */
@@ -177,6 +194,12 @@ bpred_create(enum bpred_class class,	/* type of predictor to create */
     pred->dirpred.bimod = 
       bpred_dir_create(class, bimod_size, 0, 0, 0);
 
+  //// adding perceptron case ////
+  case BPredPerceptron:
+    pred->dirpred.bimod = bpred_dir_create(class, l1size, l2size, shift_width, 0);
+    break;
+  //// end perceptron case ////
+
   case BPredTaken:
   case BPredNotTaken:
     /* no other state */
@@ -191,6 +214,7 @@ bpred_create(enum bpred_class class,	/* type of predictor to create */
   case BPredComb:
   case BPred2Level:
   case BPred2bit:
+  case BPredPerceptron:
     {
       int i;
 
@@ -320,6 +344,21 @@ bpred_dir_create (
 
     break;
 
+  //// adding perceptron case ////
+  case BPredPerceptron:
+    if (!l1size || !l2size || !shift_width) {
+      fatal("Bad perceptron size, weight bits or branch history register width!");
+    }
+    pred_dir->config.perceptron.num_perceptrons = l1size;
+    pred_dir->config.perceptron.weight_bits = l2size;
+    pred_dir->config.perceptron.branch_hist_reg_width = shift_width;
+    pred_dir->config.perceptron.g_hist = 0;
+    pred_dir->config.perceptron.speculation_history = 0;
+    pred_dir->config.perceptron.weights_table = calloc(l1size, sizeof(int)*(shift_width + 1));
+    pred_dir->config.perceptron.perceptron_table = calloc(l1size, sizeof(unsigned long long));
+    break;
+  //// end perceptron case ////
+
   case BPredTaken:
   case BPredNotTaken:
     /* no other state */
@@ -359,6 +398,12 @@ bpred_dir_config(
   case BPredNotTaken:
     fprintf(stream, "pred_dir: %s: predict not taken\n", name);
     break;
+
+  //// add perceptron dir config ////
+  case BPredPerceptron:
+    fprintf(stream, "pred_dir: %s: %d # of percpetrons, %d weight bits, %d history\n", name, pred_dir->config.perceptron.num_perceptrons, pred_dir->config.perceptron.weight_bits, pred_dir->config.perceptron.branch_hist_reg_width);
+    break;
+  //// end perceptron dir config ////
 
   default:
     panic("bogus branch direction predictor class");
@@ -400,6 +445,14 @@ bpred_config(struct bpred_t *pred,	/* branch predictor instance */
   case BPredNotTaken:
     bpred_dir_config (pred->dirpred.bimod, "nottaken", stream);
     break;
+  
+  //// adding perceptron ////
+  case BPredPerceptron:
+    bpred_dir_config (pred->dirpred.bimod, "perceptron", stream);
+    fprintf(stream, "btb: %d sets x %d associativity", pred->btb.sets, pred->btb.assoc);
+    fprintf(stream, "ret_stack: %d entries", pred->retstack.size);
+    break;
+  //// end perceptron config ////
 
   default:
     panic("bogus branch predictor class");
@@ -442,6 +495,11 @@ bpred_reg_stats(struct bpred_t *pred,	/* branch predictor instance */
     case BPredNotTaken:
       name = "bpred_nottaken";
       break;
+    //// adding perceptron ////
+    case BPredPerceptron:
+      name = "bpred_perceptron";
+      break;
+    //// end perceptron case ////
     default:
       panic("bogus branch predictor class");
     }
@@ -556,6 +614,12 @@ bpred_after_priming(struct bpred_t *bpred)
   ((((ADDR) >> 19) ^ ((ADDR) >> MD_BR_SHIFT)) & ((PRED)->config.bimod.size-1))
     /* was: ((baddr >> 16) ^ baddr) & (pred->dirpred.bimod.size-1) */
 
+//// add perceptron hash ////
+// hash the branch address to produce index i within the table of perceptrons
+// from section 3.5 of the paper
+#define PERCEPTRON_HASH(PRED, ADDR) ((((ADDR) >> 19) ^ ((ADDR) >> MD_BR_SHIFT)) & ((PRED)->config.perceptron.num_perceptrons-1))
+//// end perceptron hash ////
+
 /* predicts a branch direction */
 char *						/* pointer to counter */
 bpred_dir_lookup(struct bpred_dir_t *pred_dir,	/* branch dir predictor inst */
@@ -602,6 +666,59 @@ bpred_dir_lookup(struct bpred_dir_t *pred_dir,	/* branch dir predictor inst */
     case BPred2bit:
       p = &pred_dir->config.bimod.table[BIMOD_HASH(pred_dir, baddr)];
       break;
+
+    //// add perceptron case ////
+    case BPredPerceptron: {
+      int i;
+      int index;
+      int out;
+      unsigned long long mask;
+      int* w;
+      int* entry;
+      unsigned long long* access_entry;
+
+      perceptron_update_t* perceptron_state;
+
+      // calculate the index of the perceptron based on the branch address
+      index = PERCEPTRON_HASH(pred_dir, baddr);
+
+      // fetch the entry of the weights table corresponding with the perceptron index
+      entry = &pred_dir->config.perceptron.weights_table[index*(pred_dir->config.perceptron.branch_hist_reg_width+1)];
+      // fetch the perceptron from the table
+      access_entry = &pred_dir->config.perceptron.perceptron_table[index];
+
+      *access_entry += 1;
+      // retrieve the first item from the weights table
+      w = &entry[0];
+      // intialize out to w_0
+      out = *w;
+      // increment w to w_1
+      w++;
+      // perform the summation of weight_i * entry_i across all branch outcomes
+      for (i = 1, mask = 1; i <= pred_dir->config.perceptron.branch_hist_reg_width; i++, mask<<=1, w++) {
+        if(mask & pred_dir->config.perceptron.speculation_history) {
+          out += *w;
+        }
+        else {
+          out += (-(*w));
+        }
+      }
+      perceptron_state = calloc(1, sizeof(perceptron_update_t));
+      perceptron_state->out = out;
+      perceptron_state->weights_table_entry = entry;
+      perceptron_state->access_entry = access_entry;
+      perceptron_state->speculation_history = pred_dir->config.perceptron.speculation_history;
+      // if the prior summation resulted in a value >= 0, set to 1, otherwise 0
+      perceptron_state->prediction = (out >= 0) ? 1 : 0;
+      perceptron_state->place_holder = (perceptron_state->prediction) ? 3 : 0;
+
+      // update the speculation history with the latest prediction outcome
+      pred_dir->config.perceptron.speculation_history <<=1;
+      pred_dir->config.perceptron.speculation_history |= perceptron_state->prediction;
+      p = (char *) perceptron_state;
+    }
+    //// end perceptron case ////
+    
     case BPredTaken:
     case BPredNotTaken:
       break;
@@ -678,6 +795,7 @@ bpred_lookup(struct bpred_t *pred,	/* branch predictor instance */
 	    bpred_dir_lookup (pred->dirpred.twolev, baddr);
 	}
       break;
+    case BPredPerceptron:
     case BPred2bit:
       if ((MD_OP_FLAGS(op) & (F_CTRL|F_UNCOND)) != (F_CTRL|F_UNCOND))
 	{
@@ -983,6 +1101,74 @@ bpred_update(struct bpred_t *pred,	/* branch predictor instance */
   /* update state (but not for jumps) */
   if (dir_update_ptr->pdir1)
     {
+      // if the predictor is the perceptron
+      if(pred->class == BPredPerceptron) {
+        perceptron_update_t *u = (perceptron_update_t *) dir_update_ptr->pdir1;
+        int i;
+        int y;
+        int mask;
+        int* weight;
+        unsigned long long int hist;
+
+        // shift the global history over 1 to make room on the end for the latest branch result
+        pred->dirpred.bimod->config.perceptron.g_hist <<= 1;
+        // append the result to the LSB of the global history
+        pred->dirpred.bimod->config.perceptron.g_hist |= taken;
+
+        if(u->prediction != taken){
+          pred->dirpred.bimod->config.perceptron.speculation_history = pred->dirpred.bimod->config.perceptron.g_hist;
+        }
+        // compute output y
+        if (u->out > THETA(pred->dirpred.bimod->config.perceptron.branch_hist_reg_width)) {
+          y = 1;
+        } else if (u->out < THETA(pred->dirpred.bimod->config.perceptron.branch_hist_reg_width)) {
+          y = 0;
+        } else {
+          y = 2;
+        }
+
+        // "The branch is predicted not taken when y is negative, or taken otherwise"
+        // If the weight needs to be updated
+        if (!((taken && (y == 1)) || (!taken && y == 0))) {
+          // retrieve the first item from the weights table
+          weight = &u->weights_table_entry[0];
+          // if the branch is taken (agreement), increase the weight
+          if(taken){
+            (*weight)++;
+          } 
+          // otherwise (not taken), decrement the weight
+          else {
+            (*weight)--;
+          }
+          // after incrementation/decrementation...
+          // if the computed weight exceeds the max weight size allowable
+          if(*weight > MAX_WEIGHT(pred->dirpred.bimod->config.perceptron.weight_bits)) {
+            *weight = MAX_WEIGHT(pred->dirpred.bimod->config.perceptron.weight_bits);
+          }
+          // if the computed weight is less than the min weight size allowable
+          if(*weight < MIN_WEIGHT(pred->dirpred.bimod->config.perceptron.weight_bits)) {
+            *weight = MIN_WEIGHT(pred->dirpred.bimod->config.perceptron.weight_bits);
+          }
+          weight++;
+          hist = u->speculation_history;
+          for (i=0, mask=1; i < pred->dirpred.bimod->config.perceptron.branch_hist_reg_width; i++, mask <<= 1, weight++) {
+            // if the branch was taken and the speculation history matches this
+            if (taken == (!!(hist & mask))){
+              // increment weight
+              (*weight)++;
+              // once again perform bounds checks on the computed weight value
+              if (*weight > MAX_WEIGHT(pred->dirpred.bimod->config.perceptron.weight_bits)){
+                *weight = MAX_WEIGHT(pred->dirpred.bimod->config.perceptron.weight_bits);
+              } else {
+                (*weight)--;
+                if (*weight < MIN_WEIGHT(pred->dirpred.bimod->config.perceptron.weight_bits)){
+                  *weight = MIN_WEIGHT(pred->dirpred.bimod->config.perceptron.weight_bits);
+                }
+              }
+            }
+          }
+        }
+      }
       if (taken)
 	{
 	  if (*dir_update_ptr->pdir1 < 3)

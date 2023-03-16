@@ -153,9 +153,9 @@ enum bpred_class {
   BPredComb,                    /* combined predictor (McFarling) */
   BPred2Level,			/* 2-level correlating pred w/2-bit counters */
   BPred2bit,			/* 2-bit saturating cntr pred (dir mapped) */
+  BPredPerceptron,
   BPredTaken,			/* static predict taken */
   BPredNotTaken,		/* static predict not taken */
-  BPred_NUM
 };
 
 /* an entry in a BTB */
@@ -182,6 +182,20 @@ struct bpred_dir_t {
       int *shiftregs;		/* level-1 history table */
       unsigned char *l2table;	/* level-2 prediction state table */
     } two;
+    struct {
+      // the number of perceptrons in our predictor
+      int num_perceptrons;
+      // the number of bits per perceptron weight
+      int weight_bits;
+      // the number of bits in our branch history register
+      int branch_hist_reg_width;
+      // table containing all weights for each perceptron
+      int *weights_table;
+      // table of all perceptrons
+      unsigned long long *perceptron_table;
+      unsigned long long g_hist;
+      unsigned long long speculation_history;
+    } perceptron;
   } config;
 };
 
